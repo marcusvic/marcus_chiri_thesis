@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+/code_references
+
+.env
+*.csv
+*.xlsx
+*.ps1
