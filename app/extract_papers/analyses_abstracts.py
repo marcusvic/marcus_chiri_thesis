@@ -6,6 +6,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import ModelRetry
 import sqlite3
 import time
+from pathlib import Path
 
 nest_asyncio.apply()  # for running with interactive python
 # Set up logging
@@ -16,11 +17,11 @@ logging.basicConfig(
 class ResponseModel(BaseModel):
     """Structured response with metadata."""
 
-    should_be_analysed: bool = Field(
-        description="Indicates if the paper should be analysed"
+    should_be_included: bool = Field(
+        description="Indicates if the paper should be included in the review",
     )
     confidence_level: float = Field(
-        description="Confidence level in the analysis decision", ge=0, le=1
+        description="Confidence level in the decision wether to include the paper in the review", ge=0, le=1
     )
     summary: str = Field(
         description="Brief summary of the analysis decision",
@@ -37,27 +38,7 @@ class Paper(BaseModel):
     abstract: str
 
 
-# Agent with structured output and dependencies
-agent3 = Agent(
-    model="openai:gpt-4.1",
-    output_type=ResponseModel,
-    deps_type=Paper,
-    retries=3,
-    message_history=None,
-    instructions="There are 2 ways of analysing policy implementation performance. Some papers analyse which factors caused the policy implementation performance (these are type A papers), and other papers analyse which effects a specific factor had in policy implementation performance (these are type B papers). We only want to analyse type A papers. Please exclude papers that focus solely on the effect of one particular variable on the outcome. You are receiving a list containing a paper's id, title and abstract. Output if the paper should be analysed or not (should_be_analysed), your confidence level between 0 and 1 in making this choice (confidence_level), and a very brief summary of why you made this choice (summary).",
-)
-
-
-# Add dynamic system prompt based on dependencies
-@agent3.system_prompt
-async def add_customer_name(ctx: RunContext[Paper]) -> str:
-    return f"Customer details: {ctx.deps}"
-
 # Function to retrieve papers from the SQLite database
-from pathlib import Path
-files_dir = str(Path(__file__).parent.parent)
-db_path = files_dir + "\\scopus_results.db"
-
 def ensure_columns_exist(db_path: str):
     conn = sqlite3.connect(db_path)
     c = conn.cursor()
@@ -73,7 +54,7 @@ def ensure_columns_exist(db_path: str):
     conn.close()
 
 
-def process_and_update_papers(db_path: str):
+def process_and_update_papers(db_path: str, agent):
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor2 = conn.cursor()
@@ -82,7 +63,7 @@ def process_and_update_papers(db_path: str):
     for eid, title, abstract in cursor:
         paper = Paper(eid=eid, title=title, abstract=abstract)
         logging.info(f"Processing paper: {title}")
-        response = agent3.run_sync(user_prompt="Retrieve the structured output", deps=paper)
+        response = agent.run_sync(user_prompt="Retrieve the structured output", deps=paper)
         result = response.output
         # Store as bool (True/False)
         cursor2.execute(
@@ -105,5 +86,34 @@ def process_and_update_papers(db_path: str):
 #     papers = [{"eid": row[0], "title": row[1], "abstract": row[2]} for row in rows]
 #     return papers
 
-ensure_columns_exist(db_path)
-process_and_update_papers(db_path)
+
+if __name__ == "__main__":
+    logging.info("Starting paper analysis...")
+
+    # Config:
+    instruction_file = Path(__file__).parent.parent.parent / "resources" / "screening_promt.txt"
+    db_dir = str(Path(__file__).parent.parent)
+    db_path = db_dir + "\\scopus_results_2.db"
+
+
+    with open(instruction_file, "r", encoding="utf-8") as file:
+        instructions_text = file.read()
+
+    # Agent with structured output and dependencies
+    agent = Agent(
+        model="openai:gpt-4.1",
+        output_type=ResponseModel,
+        deps_type=Paper,
+        retries=3,
+        message_history=None,
+        instructions=instructions_text,
+    )
+
+
+    # Add dynamic system prompt based on dependencies
+    @agent.system_prompt
+    async def analyse_paper(ctx: RunContext[Paper]) -> str:
+        return f"Paper: {ctx.deps}"
+
+    ensure_columns_exist(db_path)
+    process_and_update_papers(db_path, agent)
